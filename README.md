@@ -8,6 +8,9 @@ Aegis is a high-performance, premium intelligence and data integration platform 
 ## Features
 - **Geospatial Intelligence Map**: Real-time tracking of assets, incidents, and anomalies on a dark-themed interactive map (powered by Leaflet).
 - **Live Intelligence Feed**: A live updating feed of critical and warning incidents.
+- **Entity-Relationship Graph**: Interactive, draggable node-based graph visualizing connections between people, organizations, and places. Click any node to open its dossier.
+- **Dossier System**: Detailed entity profiles with attributes, known associates, linked incidents, and a historical activity timeline. Navigate between related entities by clicking associates.
+- **Advanced Filtering**: Filter the geospatial map and intelligence feed by severity, incident type, and time window.
 - **Premium Aesthetics**: A specialized dark mode UI featuring glassmorphism, responsive grid layouts, and neon accents designed for minimal eye strain in command centers.
 - **Zero-Dependency Core**: Built purely with Vanilla HTML, CSS, and JavaScript for maximum performance and portability—no build tools required to run the core dashboard.
 
@@ -58,9 +61,9 @@ gotham-clone/
 ---
 
 ## Upcoming Features (Roadmap)
-- [ ] **Entity-Relationship Graph View**: Interactive node-based graph for visualizing connections between people, places, and organizations.
-- [ ] **Dossier System**: Detailed profiles and historical data for tracked entities.
-- [ ] **Advanced Filtering**: Filter the global map and feed by time, severity, and type.
+- [x] **Entity-Relationship Graph View**: Interactive node-based graph for visualizing connections between people, places, and organizations.
+- [x] **Dossier System**: Detailed profiles and historical data for tracked entities.
+- [x] **Advanced Filtering**: Filter the global map and feed by time, severity, and type.
 
 ---
 
