@@ -1,18 +1,18 @@
 # Aegis: Strategic Operations Command (Gotham Clone)
 
-![Aegis Logo/Screenshot Placeholder](https://via.placeholder.com/800x400/080c11/00f0ff?text=Aegis+Intelligence+Platform)
+![Aegis Logo/Screenshot Placeholder](aegis-intelligence\Aegis Intelligence.png)
 Aegis is a high-performance, premium intelligence and data integration platform inspired by Palantir Gotham. Designed for complex data analysis, geospatial tracking, and entity relationship visualization, Aegis provides a unified dashboard for strategic decision-making in high-stakes environments.
 
 ---
 
 ## Features
-- **Geospatial Intelligence Map**: Real-time tracking of assets, incidents, and anomalies on a dark-themed interactive map (powered by Leaflet).
-- **Live Intelligence Feed**: A live updating feed of critical and warning incidents.
-- **Entity-Relationship Graph**: Interactive, draggable node-based graph visualizing connections between people, organizations, and places. Click any node to open its dossier.
-- **Dossier System**: Detailed entity profiles with attributes, known associates, linked incidents, and a historical activity timeline. Navigate between related entities by clicking associates.
-- **Advanced Filtering**: Filter the geospatial map and intelligence feed by severity, incident type, and time window.
-- **Premium Aesthetics**: A specialized dark mode UI featuring glassmorphism, responsive grid layouts, and neon accents designed for minimal eye strain in command centers.
-- **Zero-Dependency Core**: Built purely with Vanilla HTML, CSS, and JavaScript for maximum performance and portability—no build tools required to run the core dashboard.
+- **Advanced Geospatial Mapping**: Real-time tracking with map base-layer switching (Tactical Dark, ESRI Satellite, Vector Grid), chronological timeline playback slider with expanding ripple alerts, and custom drawing overlays (operational paths and exclusion zones).
+- **Network Graph & Link Intelligence**: Draggable force-directed graph with hardware-accelerated pan/zoom, dynamic affiliation clustering halos, and a BFS-based shortest-path finder highlighting connections between targets.
+- **Dossier System**: Detailed interactive profiles containing attributes, known associates, related incidents, and timeline logs. Navigate between targets instantly or export formatted physical reports via PDF.
+- **Command & Control (C2) Immersion**: Interactive DEFCON threat levels shifting dashboard themes to red maximum alert, built-in Web Audio synthesizer (alarms/clicks), text-to-speech voice notifications, and scrolling SIGINT terminal telemetry logs.
+- **Operations Triage Simulator**: Dynamic coordinate incident reporting modal (Log Point) and an active operations threat simulator with an incident acknowledgment triage queue.
+- **Premium Aesthetics**: Cyberpunk glassmorphism layout, responsive grid panels, and glowing neon visual cues designed for minimal eye strain in strategic environments.
+- **Zero-Dependency Core**: Built purely with native HTML5, CSS3, and ES6+ JavaScript—no compilers, frameworks, or build dependencies required.
 
 ---
 
@@ -61,9 +61,13 @@ gotham-clone/
 ---
 
 ## Upcoming Features (Roadmap)
-- [x] **Entity-Relationship Graph View**: Interactive node-based graph for visualizing connections between people, places, and organizations.
-- [x] **Dossier System**: Detailed profiles and historical data for tracked entities.
-- [x] **Advanced Filtering**: Filter the global map and feed by time, severity, and type.
+- [x] **Geospatial Timeline Playback & Layout Switcher**: Play historical alerts over time; toggle vector and satellite basemaps.
+- [x] **Tactical Draw Overlay**: Place paths and boundary boxes directly on the map.
+- [x] **SVG Graph Pan, Zoom & Clusters**: Pan/zoom canvas, locate shortest links via BFS, and circle affiliate groups.
+- [x] **Interactive DEFCON Alerts & Audio Synth**: Dynamic crimson alert states, synthesized beeps, and spoken threat alerts.
+- [x] **SIGINT Console Drawer**: Scrolling mock telemetry logs and decrypt handshakes.
+- [x] **Log Point Modal & Simulator**: Interactive coordinate incident reports and dynamic threat generator.
+- [x] **Print-Media Dossier Export**: Generate printable PDF dossier reports cleanly.
 
 ---
 
