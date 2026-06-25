@@ -117,15 +117,99 @@ const LINKS = [
 ];
 
 const TYPE_LABELS = {
-    incursion: 'Incursion', signal: 'Signal', logistics: 'Logistics',
-    aerial: 'Aerial', finance: 'Finance'
-};
-
 const ENTITY_KIND_LABELS = { person: 'Person', organization: 'Organization', place: 'Place' };
 
+// // --------------------------------------------------------------------------
+// Application State & Audio Systems
 // --------------------------------------------------------------------------
-// Application State
-// --------------------------------------------------------------------------
+
+// Native Web Audio Synthesizer
+let audioCtx;
+function getAudioContext() {
+    if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+    }
+    return audioCtx;
+}
+
+function playTone(frequency, type, duration, volume = 0.1) {
+    if (!state.audioEnabled) return;
+    try {
+        const ctx = getAudioContext();
+        const osc = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        osc.type = type;
+        osc.frequency.value = frequency;
+        
+        gainNode.gain.setValueAtTime(volume, ctx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + duration);
+        
+        osc.connect(gainNode);
+        gainNode.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + duration);
+    } catch (e) {
+        console.warn('Audio play failed:', e);
+    }
+}
+
+const audio = {
+    chirp: () => playTone(850, 'sine', 0.07, 0.12),
+    tick: () => playTone(1200, 'triangle', 0.015, 0.04),
+    alert: () => {
+        if (!state.audioEnabled) return;
+        try {
+            const ctx = getAudioContext();
+            const osc = ctx.createOscillator();
+            const gainNode = ctx.createGain();
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(160, ctx.currentTime);
+            osc.frequency.linearRampToValueAtTime(480, ctx.currentTime + 0.3);
+            gainNode.gain.setValueAtTime(0.1, ctx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
+            osc.connect(gainNode);
+            gainNode.connect(ctx.destination);
+            osc.start();
+            osc.stop(ctx.currentTime + 0.35);
+        } catch (e) {}
+    },
+    siren: () => {
+        if (!state.audioEnabled) return;
+        try {
+            const ctx = getAudioContext();
+            const osc = ctx.createOscillator();
+            const gainNode = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(320, ctx.currentTime);
+            osc.frequency.linearRampToValueAtTime(640, ctx.currentTime + 0.4);
+            osc.frequency.linearRampToValueAtTime(320, ctx.currentTime + 0.8);
+            gainNode.gain.setValueAtTime(0.12, ctx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.85);
+            osc.connect(gainNode);
+            gainNode.connect(ctx.destination);
+            osc.start();
+            osc.stop(ctx.currentTime + 0.85);
+        } catch(e) {}
+    },
+    speak: (text) => {
+        if (!state.audioEnabled) return;
+        try {
+            window.speechSynthesis.cancel();
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.rate = 1.05;
+            utterance.pitch = 0.95;
+            const voices = window.speechSynthesis.getVoices();
+            if (voices.length > 0) {
+                const enVoice = voices.find(v => v.lang.startsWith('en'));
+                if (enVoice) utterance.voice = enVoice;
+            }
+            window.speechSynthesis.speak(utterance);
+        } catch (e) {}
+    }
+};
 
 const state = {
     view: 'geo',
@@ -135,7 +219,25 @@ const state = {
         time: 'all'
     },
     dossierType: 'all',
-    selectedEntity: null
+    selectedEntity: null,
+    
+    // Tactical command states
+    defcon: 4,
+    audioEnabled: false,
+    playback: {
+        playing: false,
+        value: 48,
+        intervalId: null
+    },
+    simEnabled: false,
+    simIntervalId: null,
+    unresolvedIncidents: new Set(),
+    drawMode: null, // 'path', 'zone', 'logPoint', or null
+    drawnItems: [], // keeps drawn polyline/polygon objects on map
+    activePathfinder: false,
+    pathfinderSource: null,
+    pathfinderTarget: null,
+    mapLayer: 'dark'
 };
 
 let map;
@@ -143,7 +245,7 @@ let markers = {};
 let graphInitialized = false;
 
 // --------------------------------------------------------------------------
-// Init
+// Init App
 // --------------------------------------------------------------------------
 
 function initApp() {
@@ -153,6 +255,15 @@ function initApp() {
     initNavigation();
     initDossiers();
     initSearch();
+    
+    // Initialize Upgraded Systems
+    initAudioToggle();
+    initDefcon();
+    initPlayback();
+    initMapControls();
+    initConsole();
+    initIncidentModal();
+    initGraphControls();
 }
 
 // --------------------------------------------------------------------------
@@ -161,16 +272,39 @@ function initApp() {
 
 function initMap() {
     map = L.map('map-container', {
-        zoomControl: false
+        zoomControl: false,
+        doubleClickZoom: false // disable to allow double click drawings
     }).setView([45.0, 10.0], 3);
 
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-        subdomains: 'abcd',
-        maxZoom: 20
-    }).addTo(map);
+    // Initialize layered tile maps
+    state.mapLayers = {
+        dark: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; CartoDB Dark Matter',
+            subdomains: 'abcd',
+            maxZoom: 20
+        }),
+        satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+            attribution: '&copy; ESRI World Imagery',
+            maxZoom: 18
+        }),
+        grid: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; CartoDB Dark Grid',
+            subdomains: 'abcd',
+            maxZoom: 20
+        })
+    };
 
+    // Load default Dark Tactical map
+    state.mapLayers.dark.addTo(map);
     L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+    // Bind map events for coordinates draw and point reporting
+    map.on('click', handleMapClick);
+    map.on('dblclick', (e) => {
+        if (!state.drawMode || state.drawMode === 'logPoint') return;
+        L.DomEvent.preventDefault(e);
+        finishDrawing();
+    });
 }
 
 function plotMarkers(incidents) {
@@ -209,11 +343,21 @@ function populateIncidents(incidents) {
 
     incidents.forEach(incident => {
         const card = document.createElement('div');
-        card.className = `incident-card ${incident.type}`;
+        const isUnresolved = state.unresolvedIncidents.has(incident.id);
+        
+        card.className = `incident-card ${incident.type} ${isUnresolved ? 'unresolved' : ''}`;
 
         card.onclick = () => {
             map.flyTo(incident.location, 6, { duration: 1.5 });
             markers[incident.id].openPopup();
+            
+            // Resolve simulator incident on click
+            if (state.unresolvedIncidents.has(incident.id)) {
+                state.unresolvedIncidents.delete(incident.id);
+                card.classList.remove('unresolved');
+                logConsole('TRIAGE', 'SYS', `TACTICAL THREAT REPORT ${incident.id} ACKNOWLEDGED`);
+                audio.chirp();
+            }
         };
 
         card.innerHTML = `
@@ -225,6 +369,7 @@ function populateIncidents(incidents) {
             <div class="incident-meta">
                 <span class="tag tag-${incident.type}">${incident.type}</span>
                 <span class="tag tag-cat">${TYPE_LABELS[incident.category] || incident.category}</span>
+                ${isUnresolved ? '<span class="tag" style="background:rgba(255,51,102,0.2); color:#ff3366; animation:pulse 1s infinite;">Unresolved</span>' : ''}
             </div>
             <div class="incident-desc">${incident.desc}</div>
         `;
@@ -238,7 +383,6 @@ function populateIncidents(incidents) {
 // --------------------------------------------------------------------------
 
 function initFilters() {
-    // Populate dynamic incident-type chips from the data.
     const typeContainer = document.getElementById('filterType');
     const categories = [...new Set(MOCK_DATA.map(d => d.category))];
     categories.forEach(cat => {
@@ -248,7 +392,6 @@ function initFilters() {
         btn.textContent = TYPE_LABELS[cat] || cat;
         typeContainer.appendChild(btn);
     });
-    // Start with all types selected.
     categories.forEach(cat => state.filters.types.add(cat));
 
     document.getElementById('filterSeverity').addEventListener('click', (e) => {
@@ -286,10 +429,16 @@ function toggleSetChip(chip, set, value) {
 function getFilteredIncidents() {
     const { severity, types, time } = state.filters;
     const maxHours = time === 'all' ? Infinity : parseFloat(time);
+    
+    // Playback slider time boundary: Visible if age is within current playback bounds
+    const playVal = state.playback.value;
+    const minHoursAgo = 48 - playVal;
+
     return MOCK_DATA.filter(inc =>
         severity.has(inc.type) &&
         types.has(inc.category) &&
-        inc.hoursAgo <= maxHours
+        inc.hoursAgo <= maxHours &&
+        inc.hoursAgo >= minHoursAgo
     );
 }
 
@@ -305,6 +454,10 @@ function resetFilters() {
     state.filters.severity = new Set(['critical', 'warning', 'info']);
     state.filters.types = new Set(MOCK_DATA.map(d => d.category));
     state.filters.time = 'all';
+    state.playback.value = 48;
+    
+    document.getElementById('playbackSlider').value = 48;
+    updatePlaybackLabel();
 
     document.querySelectorAll('#filterSeverity .chip, #filterType .chip')
         .forEach(c => c.classList.add('active'));
@@ -325,7 +478,6 @@ function initNavigation() {
             switchView(view);
 
             if (item.dataset.focus === 'alerts') {
-                // Alerts shortcut: restrict severity to critical + warning.
                 focusAlerts();
             }
         });
@@ -343,7 +495,6 @@ function switchView(view) {
     document.getElementById('view-' + view).classList.add('active');
 
     if (view === 'geo' && map) {
-        // Leaflet needs a size recalculation after being unhidden.
         setTimeout(() => map.invalidateSize(), 60);
     }
     if (view === 'graph') {
@@ -363,11 +514,19 @@ function focusAlerts() {
 }
 
 // --------------------------------------------------------------------------
-// Entity-Relationship Graph (lightweight SVG force-directed layout)
+// Entity-Relationship Graph & Panning camera
 // --------------------------------------------------------------------------
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 let graphNodes = [];
+
+// Pan & Zoom values
+let zoomScale = 1.0;
+let panX = 0;
+let panY = 0;
+let isPanning = false;
+let startPanX = 0;
+let startPanY = 0;
 
 function renderGraph() {
     const svg = document.getElementById('graphCanvas');
@@ -376,13 +535,12 @@ function renderGraph() {
     const height = rect.height || 600;
 
     if (!graphInitialized) {
-        // Seed node positions around the centre.
         graphNodes = ENTITIES.map((e, i) => {
             const angle = (i / ENTITIES.length) * Math.PI * 2;
             return {
                 id: e.id, entity: e,
-                x: width / 2 + Math.cos(angle) * 160,
-                y: height / 2 + Math.sin(angle) * 160,
+                x: width / 2 + Math.cos(angle) * 170,
+                y: height / 2 + Math.sin(angle) * 170,
                 vx: 0, vy: 0, fixed: false
             };
         });
@@ -398,35 +556,32 @@ function runForceSimulation(width, height) {
     graphNodes.forEach(n => { nodeById[n.id] = n; });
 
     for (let iter = 0; iter < 240; iter++) {
-        // Repulsion between every pair of nodes.
         for (let i = 0; i < graphNodes.length; i++) {
             for (let j = i + 1; j < graphNodes.length; j++) {
                 const a = graphNodes[i], b = graphNodes[j];
                 let dx = a.x - b.x, dy = a.y - b.y;
                 let dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
-                const force = 9000 / (dist * dist);
+                const force = 9500 / (dist * dist);
                 const fx = (dx / dist) * force, fy = (dy / dist) * force;
                 a.vx += fx; a.vy += fy;
                 b.vx -= fx; b.vy -= fy;
             }
         }
-        // Attraction along links (spring toward ideal length).
         LINKS.forEach(link => {
             const a = nodeById[link.source], b = nodeById[link.target];
             if (!a || !b) return;
             let dx = b.x - a.x, dy = b.y - a.y;
             let dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
-            const force = (dist - 150) * 0.02;
+            const force = (dist - 140) * 0.022;
             const fx = (dx / dist) * force, fy = (dy / dist) * force;
             a.vx += fx; a.vy += fy;
             b.vx -= fx; b.vy -= fy;
         });
-        // Gentle pull toward centre + integrate with damping.
         graphNodes.forEach(n => {
             if (n.fixed) { n.vx = 0; n.vy = 0; return; }
-            n.vx += (width / 2 - n.x) * 0.002;
-            n.vy += (height / 2 - n.y) * 0.002;
-            n.vx *= 0.85; n.vy *= 0.85;
+            n.vx += (width / 2 - n.x) * 0.0025;
+            n.vy += (height / 2 - n.y) * 0.0025;
+            n.vx *= 0.82; n.vy *= 0.82;
             n.x += n.vx; n.y += n.vy;
             n.x = Math.max(40, Math.min(width - 40, n.x));
             n.y = Math.max(40, Math.min(height - 40, n.y));
@@ -434,35 +589,95 @@ function runForceSimulation(width, height) {
     }
 }
 
+function drawClusters(viewport) {
+    const groups = {};
+    ENTITIES.forEach(entity => {
+        const aff = entity.attributes && entity.attributes.Affiliation;
+        if (aff && aff !== 'Independent' && aff !== 'Unknown') {
+            if (!groups[aff]) groups[aff] = [];
+            groups[aff].push(entity.id);
+        }
+    });
+    
+    const nodeById = {};
+    graphNodes.forEach(n => { nodeById[n.id] = n; });
+    
+    Object.entries(groups).forEach(([affName, entityIds]) => {
+        const coords = entityIds.map(id => nodeById[id]).filter(Boolean);
+        if (coords.length < 2) return;
+        
+        const avgX = coords.reduce((sum, n) => sum + n.x, 0) / coords.length;
+        const avgY = coords.reduce((sum, n) => sum + n.y, 0) / coords.length;
+        
+        let maxDist = 0;
+        coords.forEach(n => {
+            const dx = n.x - avgX;
+            const dy = n.y - avgY;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist > maxDist) maxDist = dist;
+        });
+        
+        const radius = maxDist + 35;
+        
+        const halo = document.createElementNS(SVG_NS, 'circle');
+        halo.setAttribute('cx', avgX);
+        halo.setAttribute('cy', avgY);
+        halo.setAttribute('r', radius);
+        halo.setAttribute('class', 'graph-cluster-boundary');
+        viewport.appendChild(halo);
+        
+        const label = document.createElementNS(SVG_NS, 'text');
+        label.setAttribute('x', avgX);
+        label.setAttribute('y', avgY - radius - 8);
+        label.setAttribute('class', 'graph-cluster-label');
+        label.textContent = `${affName.toUpperCase()} CELL AREA`;
+        viewport.appendChild(label);
+    });
+}
+
 function drawGraph(svg, width, height) {
     svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-    svg.innerHTML = '';
+    const viewport = document.getElementById('graphViewport');
+    viewport.innerHTML = '';
+    
     const nodeById = {};
     graphNodes.forEach(n => { nodeById[n.id] = n; });
 
-    // Edges + labels first so nodes render on top.
+    // 1. Draw background affiliation clusters
+    drawClusters(viewport);
+
+    // 2. Draw edges
     LINKS.forEach(link => {
         const a = nodeById[link.source], b = nodeById[link.target];
         if (!a || !b) return;
+        
+        const gEdge = document.createElementNS(SVG_NS, 'g');
+        gEdge.setAttribute('class', 'graph-edge-group');
+        gEdge.dataset.source = link.source;
+        gEdge.dataset.target = link.target;
+        
         const line = document.createElementNS(SVG_NS, 'line');
         line.setAttribute('x1', a.x); line.setAttribute('y1', a.y);
         line.setAttribute('x2', b.x); line.setAttribute('y2', b.y);
         line.setAttribute('class', 'graph-edge');
-        svg.appendChild(line);
+        gEdge.appendChild(line);
 
         const label = document.createElementNS(SVG_NS, 'text');
         label.setAttribute('x', (a.x + b.x) / 2);
         label.setAttribute('y', (a.y + b.y) / 2 - 4);
         label.setAttribute('class', 'graph-edge-label');
         label.textContent = link.label;
-        svg.appendChild(label);
+        gEdge.appendChild(label);
+        
+        viewport.appendChild(gEdge);
     });
 
-    // Nodes.
+    // 3. Draw nodes
     graphNodes.forEach(node => {
         const g = document.createElementNS(SVG_NS, 'g');
         g.setAttribute('class', `graph-node ${node.entity.type} threat-${node.entity.threat}`);
         g.setAttribute('transform', `translate(${node.x}, ${node.y})`);
+        g.dataset.id = node.id;
 
         const circle = document.createElementNS(SVG_NS, 'circle');
         circle.setAttribute('r', node.entity.type === 'organization' ? 22 : 16);
@@ -476,8 +691,10 @@ function drawGraph(svg, width, height) {
         g.appendChild(text);
 
         attachNodeInteractions(g, node, svg);
-        svg.appendChild(g);
+        viewport.appendChild(g);
     });
+
+    updateGraphTransform();
 }
 
 function attachNodeInteractions(g, node, svg) {
@@ -486,9 +703,9 @@ function attachNodeInteractions(g, node, svg) {
 
     const toSvgPoint = (evt) => {
         const rect = svg.getBoundingClientRect();
-        const vb = svg.viewBox.baseVal;
-        const x = (evt.clientX - rect.left) / rect.width * vb.width;
-        const y = (evt.clientY - rect.top) / rect.height * vb.height;
+        // Adjust for viewport scale & pans
+        const x = (evt.clientX - rect.left - panX) / zoomScale;
+        const y = (evt.clientY - rect.top - panY) / zoomScale;
         return { x, y };
     };
 
@@ -497,6 +714,7 @@ function attachNodeInteractions(g, node, svg) {
         moved = false;
         node.fixed = true;
         g.classList.add('dragging');
+        evt.stopPropagation(); // prevent panning canvas
         evt.preventDefault();
     });
 
@@ -518,8 +736,12 @@ function attachNodeInteractions(g, node, svg) {
     });
 
     g.addEventListener('click', () => {
-        if (moved) return; // ignore clicks that were drags
-        openDossierFromGraph(node.id);
+        if (moved) return;
+        if (state.activePathfinder) {
+            handlePathfinderSelection(node.id);
+        } else {
+            openDossierFromGraph(node.id);
+        }
     });
 }
 
@@ -531,7 +753,7 @@ function openDossierFromGraph(entityId) {
 }
 
 // --------------------------------------------------------------------------
-// Dossier System
+// Dossier System & PDF Printing
 // --------------------------------------------------------------------------
 
 function initDossiers() {
@@ -627,10 +849,16 @@ function renderDossierDetail(entityId) {
     detail.innerHTML = `
         <div class="dossier-header">
             <div class="dossier-avatar-lg ${entity.type}">${initials(entity.name)}</div>
-            <div class="dossier-header-info">
-                <div class="dossier-name-row">
+            <div class="dossier-header-info" style="flex:1;">
+                <div class="dossier-name-row" style="display:flex; justify-content:space-between; align-items:center;">
                     <h1>${entity.name}</h1>
-                    <span class="threat-pill threat-${entity.threat}">${entity.threat} threat</span>
+                    <div style="display:flex; gap:10px; align-items:center;">
+                        <span class="threat-pill threat-${entity.threat}">${entity.threat} threat</span>
+                        <button class="btn-reset" id="exportDossierBtn" style="padding: 6px 12px; display:flex; align-items:center; gap:6px; cursor:pointer;" title="Generate intelligence report to print or save">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                            Export report
+                        </button>
+                    </div>
                 </div>
                 <div class="dossier-alias">"${entity.alias}" &middot; ${entity.id}</div>
                 <div class="dossier-tags">
@@ -644,7 +872,7 @@ function renderDossierDetail(entityId) {
         <div class="dossier-summary">${entity.summary}</div>
 
         <div class="dossier-section">
-            <h3 class="dossier-section-title">Profile</h3>
+            <h3 class="dossier-section-title">Profile Attributes</h3>
             <div class="attr-grid">${attributes}</div>
         </div>
 
@@ -660,14 +888,21 @@ function renderDossierDetail(entityId) {
         </div>
 
         <div class="dossier-section">
-            <h3 class="dossier-section-title">Historical Activity</h3>
+            <h3 class="dossier-section-title">Historical Operational Log</h3>
             <div class="timeline">${history}</div>
         </div>
     `;
 
-    // Jump between dossiers via associates.
+    // Jump between dossiers via associates link
     detail.querySelectorAll('.associate').forEach(el => {
         el.addEventListener('click', () => selectEntity(el.dataset.id));
+    });
+    
+    // Print report button click handler
+    document.getElementById('exportDossierBtn').addEventListener('click', () => {
+        logConsole('PRINTER', 'SYS', `INTEL PROFILE EXPORT INITIATED FOR ${entity.name}`);
+        audio.chirp();
+        window.print();
     });
 }
 
@@ -711,7 +946,708 @@ function initSearch() {
         if (match) {
             openDossierFromGraph(match.id);
         } else {
-            alert('No entity found for: ' + query);
+            logConsole('SEARCH', 'ALERT', `QUERY '${query}' - NULL MATCH FOUND`);
+            audio.alert();
+            alert('No entity matched query: ' + query);
         }
     });
+}
+
+// --------------------------------------------------------------------------
+// Upgrade Implementations: Audio, DEFCON, Playback, Drawing, Modal, Console, Simulator, Pathfinder
+// --------------------------------------------------------------------------
+
+function initAudioToggle() {
+    const btn = document.getElementById('audioToggleBtn');
+    btn.addEventListener('click', () => {
+        state.audioEnabled = !state.audioEnabled;
+        const icon = document.getElementById('audioIcon');
+        
+        if (state.audioEnabled) {
+            btn.style.color = "var(--accent-cyan)";
+            icon.innerHTML = `<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>`;
+            // Trigger audio context startup
+            getAudioContext();
+            logConsole('SYSTEM', 'SYS', 'TACTICAL VOCAL COMM AND AUDIO COMPONENT ENGAGED');
+            audio.chirp();
+            audio.speak("Vocal alert module activated.");
+        } else {
+            btn.style.color = "";
+            icon.innerHTML = `<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line>`;
+            logConsole('SYSTEM', 'SYS', 'AUDIO COMM OUTPUT DAMPENED');
+        }
+    });
+}
+
+function initDefcon() {
+    const trigger = document.getElementById('defconTrigger');
+    const dropdown = document.getElementById('defconDropdown');
+    
+    trigger.addEventListener('click', (e) => {
+        e.stopPropagation();
+        trigger.classList.toggle('open');
+    });
+    
+    document.addEventListener('click', () => {
+        trigger.classList.remove('open');
+    });
+    
+    dropdown.addEventListener('click', (e) => {
+        const opt = e.target.closest('.defcon-option');
+        if (!opt) return;
+        setDefconLevel(parseInt(opt.dataset.level));
+    });
+}
+
+function setDefconLevel(level) {
+    state.defcon = level;
+    document.getElementById('defconText').textContent = `DEFCON ${level}`;
+    document.body.setAttribute('data-defcon', level);
+    
+    if (level === 1) {
+        logConsole('COMMAND', 'ALERT', 'DEFCON 1 ALARM SEQUENCE ACTIVATED - COMBAT READY');
+        audio.siren();
+        audio.speak("System upgrade: DEFCON 1 alert sequence active. Maximum threat containment mode.");
+        focusAlerts();
+    } else if (level === 2) {
+        logConsole('COMMAND', 'ALERT', 'DEFCON 2 CODES DISTRIBUTED');
+        audio.alert();
+        audio.speak("Alert. DEFCON 2 state active.");
+    } else {
+        logConsole('COMMAND', 'SYS', `ALERT STATUS STABILIZED AT DEFCON ${level}`);
+        audio.chirp();
+    }
+}
+
+function initPlayback() {
+    const slider = document.getElementById('playbackSlider');
+    const playBtn = document.getElementById('playBtn');
+    
+    slider.addEventListener('input', (e) => {
+        state.playback.value = parseInt(e.target.value);
+        updatePlaybackLabel();
+        applyFilters();
+    });
+    
+    playBtn.addEventListener('click', () => {
+        if (state.playback.playing) {
+            pausePlayback();
+        } else {
+            startPlayback();
+        }
+    });
+}
+
+function updatePlaybackLabel() {
+    const val = state.playback.value;
+    const timeLabel = document.getElementById('playbackTime');
+    if (val === 48) {
+        timeLabel.textContent = "All Time";
+    } else {
+        const hoursAgo = 48 - val;
+        timeLabel.textContent = `-${hoursAgo} hrs`;
+    }
+}
+
+function startPlayback() {
+    const playBtn = document.getElementById('playBtn');
+    const slider = document.getElementById('playbackSlider');
+    
+    state.playback.playing = true;
+    playBtn.innerHTML = `<svg id="pauseIcon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>`;
+    logConsole('SYSTEM', 'SYS', 'CHRONOLOGICAL LOG-TIMELINE SWEEP STARTED');
+    audio.chirp();
+    
+    if (state.playback.value >= 48) {
+        state.playback.value = 0;
+        slider.value = 0;
+    }
+    
+    state.playback.intervalId = setInterval(() => {
+        state.playback.value += 1;
+        slider.value = state.playback.value;
+        updatePlaybackLabel();
+        
+        // Find simulated incidents triggered at this hour tick
+        const ageTick = 48 - state.playback.value;
+        MOCK_DATA.forEach(inc => {
+            if (inc.hoursAgo >= ageTick && inc.hoursAgo < ageTick + 1) {
+                spawnRipple(inc.location, inc.type);
+                if (inc.type === 'critical') {
+                    audio.alert();
+                } else {
+                    audio.chirp();
+                }
+            }
+        });
+        
+        applyFilters();
+        
+        if (state.playback.value >= 48) {
+            pausePlayback();
+            logConsole('SYSTEM', 'SYS', 'PLAYBACK SIMULATION SWEEP COMPLETED');
+        }
+    }, 280);
+}
+
+function pausePlayback() {
+    const playBtn = document.getElementById('playBtn');
+    state.playback.playing = false;
+    playBtn.innerHTML = `<svg id="playIcon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>`;
+    
+    if (state.playback.intervalId) {
+        clearInterval(state.playback.intervalId);
+        state.playback.intervalId = null;
+    }
+    audio.chirp();
+    logConsole('SYSTEM', 'SYS', 'PLAYBACK SWEEP PAUSED');
+}
+
+function spawnRipple(latlng, severity) {
+    if (!map) return;
+    const color = severity === 'critical' ? '#ff3366' : (severity === 'warning' ? '#ffb800' : '#00f0ff');
+    const circle = L.circle(latlng, {
+        radius: 8000,
+        color: color,
+        fillColor: color,
+        fillOpacity: 0.6,
+        weight: 1.5
+    }).addTo(map);
+    
+    let rad = 8000;
+    let opacity = 0.6;
+    const interval = setInterval(() => {
+        rad += 38000;
+        opacity -= 0.05;
+        if (opacity <= 0) {
+            clearInterval(interval);
+            map.removeLayer(circle);
+        } else {
+            circle.setRadius(rad);
+            circle.setStyle({ fillOpacity: opacity, opacity: opacity });
+        }
+    }, 45);
+    
+    state.drawnItems.push(circle);
+}
+
+function initMapControls() {
+    // Map style switching
+    document.querySelectorAll('.layer-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            const lKey = e.target.dataset.layer;
+            Object.values(state.mapLayers).forEach(layer => map.removeLayer(layer));
+            state.mapLayers[lKey].addTo(map);
+            
+            document.querySelectorAll('.layer-btn').forEach(b => b.classList.remove('active'));
+            e.target.classList.add('active');
+            state.mapLayer = lKey;
+            audio.chirp();
+            logConsole('SYSTEM', 'SYS', `TILES CHANGED: ACTIVE GRID '${lKey.toUpperCase()}'`);
+        });
+    });
+
+    // Draw buttons
+    document.getElementById('drawPolylineBtn').addEventListener('click', () => setDrawMode('path'));
+    document.getElementById('drawPolygonBtn').addEventListener('click', () => setDrawMode('zone'));
+    document.getElementById('logIncidentModeBtn').addEventListener('click', () => setDrawMode('logPoint'));
+    
+    document.getElementById('clearTacticalBtn').addEventListener('click', () => {
+        state.drawnItems.forEach(item => map.removeLayer(item));
+        state.drawnItems = [];
+        audio.chirp();
+        logConsole('SYSTEM', 'SYS', 'ALL TACTICAL MAP PLOTS PURGED');
+    });
+
+    // Live operations simulator
+    const simBtn = document.getElementById('simToggleBtn');
+    simBtn.addEventListener('click', () => {
+        state.simEnabled = !state.simEnabled;
+        simBtn.classList.toggle('active', state.simEnabled);
+        
+        if (state.simEnabled) {
+            simBtn.textContent = "Sim: ACTIVE";
+            logConsole('SYSTEM', 'SEC', 'LIVE OPS INTELLIGENCE SIMULATOR ONLINE');
+            audio.chirp();
+            startSimulator();
+        } else {
+            simBtn.textContent = "Sim: OFF";
+            logConsole('SYSTEM', 'SYS', 'LIVE SIMULATION DISCONNECTED');
+            audio.chirp();
+            stopSimulator();
+        }
+    });
+}
+
+let tempVertices = [];
+let tempDrawLine = null;
+
+function handleMapClick(e) {
+    if (!state.drawMode) return;
+    
+    if (state.drawMode === 'logPoint') {
+        openIncidentModal(e.latlng.lat, e.latlng.lng);
+        setDrawMode(null);
+        return;
+    }
+    
+    const latlng = e.latlng;
+    tempVertices.push(latlng);
+    audio.chirp();
+
+    const nodeMarker = L.circleMarker(latlng, {
+        radius: 4,
+        color: state.drawMode === 'path' ? '#00f0ff' : '#ffb800',
+        fillOpacity: 1,
+        zIndexOffset: 1200
+    }).addTo(map);
+    
+    state.drawnItems.push(nodeMarker);
+
+    if (tempVertices.length > 1) {
+        if (tempDrawLine) map.removeLayer(tempDrawLine);
+        
+        if (state.drawMode === 'path') {
+            tempDrawLine = L.polyline(tempVertices, { color: '#00f0ff', weight: 2.5, dashArray: '5,5' }).addTo(map);
+        } else {
+            tempDrawLine = L.polygon(tempVertices, { color: '#ffb800', weight: 2, fillColor: 'rgba(255,184,0,0.1)', fillOpacity: 0.4 }).addTo(map);
+        }
+    }
+}
+
+function finishDrawing() {
+    if (tempVertices.length < 2) {
+        cancelDrawing();
+        return;
+    }
+    
+    if (tempDrawLine) map.removeLayer(tempDrawLine);
+    
+    let shape;
+    if (state.drawMode === 'path') {
+        shape = L.polyline(tempVertices, { color: '#00f0ff', weight: 3 }).addTo(map);
+        logConsole('PLANNER', 'SIG', 'TACTICAL FLIGHT COORDINATES DEPLOYED');
+        audio.chirp();
+    } else {
+        shape = L.polygon(tempVertices, { color: '#ffb800', weight: 2, fillColor: 'rgba(255,184,0,0.06)', fillOpacity: 0.25 }).addTo(map);
+        logConsole('PLANNER', 'SEC', 'EXCLUSION ZONE PATROL BOX DEFINED');
+        audio.chirp();
+    }
+    
+    if (shape) state.drawnItems.push(shape);
+    
+    tempVertices = [];
+    tempDrawLine = null;
+    setDrawMode(null);
+}
+
+function cancelDrawing() {
+    tempVertices = [];
+    if (tempDrawLine) {
+        map.removeLayer(tempDrawLine);
+        tempDrawLine = null;
+    }
+}
+
+function setDrawMode(mode) {
+    cancelDrawing();
+    state.drawMode = (state.drawMode === mode) ? null : mode;
+    
+    document.querySelectorAll('.draw-btn').forEach(btn => btn.classList.remove('active'));
+    
+    if (state.drawMode) {
+        const id = state.drawMode === 'path' ? 'drawPolylineBtn' : 
+                   (state.drawMode === 'zone' ? 'drawPolygonBtn' : 'logIncidentModeBtn');
+        document.getElementById(id).classList.add('active');
+        document.getElementById('map-container').style.cursor = 'crosshair';
+        logConsole('SYSTEM', 'SYS', `TACTICAL TOOL: ${state.drawMode.toUpperCase()} STANDBY`);
+    } else {
+        document.getElementById('map-container').style.cursor = '';
+    }
+}
+
+function initConsole() {
+    const panel = document.getElementById('consolePanel');
+    const header = document.querySelector('.console-header');
+    
+    header.addEventListener('click', () => {
+        panel.classList.toggle('collapsed');
+        audio.chirp();
+    });
+    
+    logConsole('SYSTEM', 'SYS', 'COMMAND TELEMETRY SECURED');
+    logConsole('DECRYPT', 'SEC', 'DECRYPTION CORE SYNCHRONIZED');
+    logConsole('SATLINK', 'SIG', 'BURST CHANNEL STREAM ONLINE');
+    
+    setInterval(generateMockTelemetryLog, 4800);
+}
+
+function logConsole(sender, type, message) {
+    const logs = document.getElementById('consoleLogs');
+    if (!logs) return;
+    
+    const entry = document.createElement('div');
+    entry.className = 'console-log-entry';
+    
+    const now = new Date();
+    const timeStr = now.toISOString().split('T')[1].slice(0, 8);
+    
+    entry.innerHTML = `
+        <span class="console-time">[${timeStr}]</span>
+        <span class="console-type ${type.toLowerCase()}">${sender.toUpperCase()} [${type}]</span>
+        <span class="console-text">${message.toUpperCase()}</span>
+    `;
+    
+    logs.appendChild(entry);
+    logs.scrollTop = logs.scrollHeight;
+    audio.tick();
+}
+
+const CONSOLE_MESSAGES = [
+    { sender: 'SATLINK', type: 'SYS', text: 'Telemetry synchronization sweep complete: delta offset 0.05ms' },
+    { sender: 'DECRYPT', type: 'SEC', text: 'Offshore ledger decryption thread: 42% resolved' },
+    { sender: 'RECEIVER', type: 'SIG', text: 'Spectrum frequency check: vector 148.2Mhz nominal status' },
+    { sender: 'DATABASE', type: 'SYS', text: 'Re-compiled database link tables for Helix Syndicate' },
+    { sender: 'NODE-ECHO', type: 'SEC', text: 'Crypto transaction hash identified: vector location Dubai Node' },
+    { sender: 'COMM-9', type: 'SIG', text: 'SIGINT burst intercepted near Tokyo Secure Facility coords' },
+    { sender: 'ROUTING', type: 'SYS', text: 'Tracking sync coordinate check: Viktor Petrov node alignment verified' }
+];
+
+function generateMockTelemetryLog() {
+    if (state.playback.playing) return;
+    const msg = CONSOLE_MESSAGES[Math.floor(Math.random() * CONSOLE_MESSAGES.length)];
+    logConsole(msg.sender, msg.type, msg.text);
+}
+
+function openIncidentModal(lat, lng) {
+    audio.chirp();
+    document.getElementById('incLat').value = lat.toFixed(5);
+    document.getElementById('incLng').value = lng.toFixed(5);
+    document.getElementById('incTitle').value = '';
+    document.getElementById('incDesc').value = '';
+    
+    document.getElementById('incidentModal').classList.add('active');
+}
+
+function initIncidentModal() {
+    const modal = document.getElementById('incidentModal');
+    const form = document.getElementById('incidentForm');
+    
+    document.getElementById('cancelIncidentBtn').addEventListener('click', () => {
+        modal.classList.remove('active');
+        audio.chirp();
+    });
+    
+    form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        
+        const lat = parseFloat(document.getElementById('incLat').value);
+        const lng = parseFloat(document.getElementById('incLng').value);
+        const title = document.getElementById('incTitle').value.trim();
+        const type = document.getElementById('incType').value;
+        const category = document.getElementById('incCategory').value;
+        const desc = document.getElementById('incDesc').value.trim();
+        
+        const incId = `INC-${Math.floor(1000 + Math.random() * 9000)}`;
+        const newInc = {
+            id: incId,
+            type: type,
+            category: category,
+            title: title,
+            location: [lat, lng],
+            desc: desc,
+            time: new Date().toISOString().split('T')[1].slice(0, 8) + 'Z',
+            hoursAgo: 0.1,
+            entities: []
+        };
+        
+        MOCK_DATA.unshift(newInc);
+        applyFilters();
+        
+        modal.classList.remove('active');
+        logConsole('REPORTER', 'SYS', `NEW DISCOVERY REPORT ${incId} REGISTERED`);
+        audio.alert();
+        audio.speak(`Tactical alert. Incident ${incId} registered at coordinates.`);
+    });
+}
+
+function startSimulator() {
+    state.simIntervalId = setInterval(triggerSimulatedIncident, 18000);
+}
+
+function stopSimulator() {
+    if (state.simIntervalId) {
+        clearInterval(state.simIntervalId);
+        state.simIntervalId = null;
+    }
+}
+
+const MAP_HUBS = [
+    { name: 'London Node', lat: 51.5074, lng: -0.1278 },
+    { name: 'Geneva Node', lat: 46.2044, lng: 6.1432 },
+    { name: 'Tokyo Node', lat: 35.6762, lng: 139.6503 },
+    { name: 'Zurich Node', lat: 47.3769, lng: 8.5417 },
+    { name: 'Dubai Node', lat: 25.2048, lng: 55.2708 },
+    { name: 'Paris Node', lat: 48.8566, lng: 2.3522 },
+    { name: 'New York Node', lat: 40.7128, lng: -74.0060 }
+];
+
+const HUB_MESSAGES = [
+    { category: 'signal', title: 'SIGINT Decrypted Node Activity', desc: 'Encrypted message burst intercepted. Match discovered in local keys database.' },
+    { category: 'aerial', title: 'UAV Incursion Alert', desc: 'Intrusive UAV proximity radar lock detected near coordinate vector.' },
+    { category: 'finance', title: 'Flagged Offshore Transfer', desc: 'Automated bank tracing systems registered anonymous offshore pool inflow.' },
+    { category: 'logistics', title: 'Courier Route Deviation', desc: 'Secure transport courier diverted from designated highway path vector.' },
+    { category: 'incursion', title: 'Sensors Boundary Breach', desc: 'Coordinate breach logged by laser barrier monitoring nodes.' }
+];
+
+function triggerSimulatedIncident() {
+    const hub = MAP_HUBS[Math.floor(Math.random() * MAP_HUBS.length)];
+    const ev = HUB_MESSAGES[Math.floor(Math.random() * HUB_MESSAGES.length)];
+    
+    // Position jitter around hub center
+    const lat = hub.lat + (Math.random() - 0.5) * 0.12;
+    const lng = hub.lng + (Math.random() - 0.5) * 0.12;
+    
+    const newId = `SIM-${Math.floor(1000 + Math.random() * 9000)}`;
+    const newInc = {
+        id: newId,
+        type: Math.random() > 0.45 ? 'warning' : 'critical',
+        category: ev.category,
+        title: `${ev.title} (${hub.name})`,
+        location: [lat, lng],
+        desc: ev.desc,
+        time: new Date().toISOString().split('T')[1].slice(0, 8) + 'Z',
+        hoursAgo: 0.1,
+        entities: []
+    };
+    
+    MOCK_DATA.unshift(newInc);
+    state.unresolvedIncidents.add(newId);
+    
+    applyFilters();
+    
+    // Zoom/trigger visual indicators
+    spawnRipple(newInc.location, newInc.type);
+    logConsole('ALARM', 'SIG', `TACTICAL THREAT: SIMULATION ${newId} SPOTTED`);
+    audio.siren();
+    audio.speak(`Threat detected. ${ev.title}`);
+}
+
+function initGraphControls() {
+    const canvas = document.getElementById('graphCanvas');
+    const resetBtn = document.getElementById('graphResetBtn');
+    const pathfinderBtn = document.getElementById('pathfinderToggleBtn');
+    
+    resetBtn.addEventListener('click', () => {
+        zoomScale = 1.0;
+        panX = 0;
+        panY = 0;
+        updateGraphTransform();
+        audio.chirp();
+        logConsole('SYSTEM', 'SYS', 'CAMERA TRANSLATION VECTOR CLEAR');
+    });
+    
+    pathfinderBtn.addEventListener('click', () => {
+        state.activePathfinder = !state.activePathfinder;
+        state.pathfinderSource = null;
+        state.pathfinderTarget = null;
+        pathfinderBtn.classList.toggle('active', state.activePathfinder);
+        
+        const hint = document.getElementById('graphHint');
+        if (state.activePathfinder) {
+            hint.textContent = "PATHFINDER ENGAGED: Select Source Node on graph...";
+            hint.style.color = "#10b981";
+            logConsole('DECRYPT', 'SEC', 'BFS DIRECT CONNECTIVITY PATHFINDER READY');
+            audio.chirp();
+        } else {
+            hint.textContent = "Drag canvas to pan · Scroll to zoom · Click to open dossier";
+            hint.style.color = "";
+            document.querySelectorAll('.graph-node, .graph-edge-group, .graph-edge').forEach(el => {
+                el.classList.remove('highlighted', 'dimmed');
+            });
+            audio.chirp();
+        }
+    });
+
+    // Panning canvas drag listeners
+    canvas.addEventListener('mousedown', (e) => {
+        if (e.target === canvas || e.target.id === 'graphViewport' || e.target.classList.contains('graph-cluster-boundary')) {
+            isPanning = true;
+            canvas.style.cursor = 'grabbing';
+            startPanX = e.clientX - panX;
+            startPanY = e.clientY - panY;
+            e.preventDefault();
+        }
+    });
+    
+    window.addEventListener('mousemove', (e) => {
+        if (!isPanning) return;
+        panX = e.clientX - startPanX;
+        panY = e.clientY - startPanY;
+        updateGraphTransform();
+    });
+    
+    window.addEventListener('mouseup', () => {
+        if (isPanning) {
+            isPanning = false;
+            canvas.style.cursor = 'grab';
+        }
+    });
+    
+    // Zooming canvas wheel listener
+    canvas.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const intensity = 0.07;
+        const rect = canvas.getBoundingClientRect();
+        
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+        
+        const wheel = e.deltaY < 0 ? 1 : -1;
+        const zoom = Math.exp(wheel * intensity);
+        const nextScale = Math.min(Math.max(zoomScale * zoom, 0.22), 4.0);
+        
+        // Translate pan offset toward mouse focus
+        panX = mouseX - (mouseX - panX) * (nextScale / zoomScale);
+        panY = mouseY - (mouseY - panY) * (nextScale / zoomScale);
+        zoomScale = nextScale;
+        
+        updateGraphTransform();
+    });
+}
+
+function updateGraphTransform() {
+    const viewport = document.getElementById('graphViewport');
+    if (viewport) {
+        viewport.setAttribute('transform', `translate(${panX}, ${panY}) scale(${zoomScale})`);
+    }
+}
+
+function handlePathfinderSelection(entityId) {
+    const hint = document.getElementById('graphHint');
+    audio.chirp();
+    
+    if (!state.pathfinderSource) {
+        state.pathfinderSource = entityId;
+        hint.textContent = `SOURCE ACQUIRED: ${entityId}. Select Target Node...`;
+        hint.style.color = "#ffb800";
+        
+        document.querySelectorAll('.graph-node').forEach(el => {
+            if (el.dataset.id === entityId) {
+                el.classList.add('highlighted');
+            } else {
+                el.classList.add('dimmed');
+            }
+        });
+    } else if (!state.pathfinderTarget) {
+        if (entityId === state.pathfinderSource) {
+            state.pathfinderSource = null;
+            hint.textContent = "PATHFINDER ENGAGED: Select Source Node on graph...";
+            hint.style.color = "#10b981";
+            document.querySelectorAll('.graph-node').forEach(el => el.classList.remove('highlighted', 'dimmed'));
+            return;
+        }
+        
+        state.pathfinderTarget = entityId;
+        const path = findShortestPathBFS(state.pathfinderSource, state.pathfinderTarget);
+        
+        if (path) {
+            hint.textContent = `PATH LOCKED: ${path.join(' ➔ ')}. Toggle Pathfinder OFF to clear.`;
+            hint.style.color = "#10b981";
+            logConsole('SYSTEM', 'SEC', `LINK ROUTE FOUND: ${state.pathfinderSource} TO ${state.pathfinderTarget}`);
+            audio.siren();
+            
+            const pathSet = new Set(path);
+            
+            document.querySelectorAll('.graph-node').forEach(el => {
+                const id = el.dataset.id;
+                if (pathSet.has(id)) {
+                    el.classList.remove('dimmed');
+                    el.classList.add('highlighted');
+                } else {
+                    el.classList.remove('highlighted');
+                    el.classList.add('dimmed');
+                }
+            });
+            
+            document.querySelectorAll('.graph-edge-group').forEach(el => {
+                const s = el.dataset.source;
+                const t = el.dataset.target;
+                
+                let inPath = false;
+                for (let i = 0; i < path.length - 1; i++) {
+                    if ((path[i] === s && path[i+1] === t) || (path[i] === t && path[i+1] === s)) {
+                        inPath = true;
+                        break;
+                    }
+                }
+                
+                if (inPath) {
+                    el.querySelector('.graph-edge').classList.add('highlighted');
+                    el.classList.remove('dimmed');
+                } else {
+                    el.querySelector('.graph-edge').classList.remove('highlighted');
+                    el.classList.add('dimmed');
+                }
+            });
+        } else {
+            hint.textContent = `NO DIRECT SIGNAL LINKS BETWEEN ${state.pathfinderSource} AND ${state.pathfinderTarget}. Select new source...`;
+            hint.style.color = "#ff3366";
+            logConsole('SYSTEM', 'ALERT', 'PATHWAY INTEGRITY BROKEN: NO CONNECTING LINKS');
+            audio.alert();
+            
+            state.pathfinderSource = null;
+            state.pathfinderTarget = null;
+            document.querySelectorAll('.graph-node').forEach(el => el.classList.remove('highlighted', 'dimmed'));
+        }
+    } else {
+        state.pathfinderSource = entityId;
+        state.pathfinderTarget = null;
+        hint.textContent = `SOURCE ACQUIRED: ${entityId}. Select Target Node...`;
+        hint.style.color = "#ffb800";
+        document.querySelectorAll('.graph-node').forEach(el => {
+            if (el.dataset.id === entityId) {
+                el.classList.remove('dimmed');
+                el.classList.add('highlighted');
+            } else {
+                el.classList.add('highlighted');
+                el.classList.add('dimmed');
+            }
+        });
+        document.querySelectorAll('.graph-edge-group .graph-edge').forEach(el => el.classList.remove('highlighted'));
+        document.querySelectorAll('.graph-edge-group').forEach(el => el.classList.remove('dimmed'));
+    }
+}
+
+function findShortestPathBFS(startId, endId) {
+    if (startId === endId) return [startId];
+    
+    const adjacency = {};
+    ENTITIES.forEach(e => { adjacency[e.id] = []; });
+    
+    LINKS.forEach(link => {
+        if (!adjacency[link.source]) adjacency[link.source] = [];
+        if (!adjacency[link.target]) adjacency[link.target] = [];
+        adjacency[link.source].push(link.target);
+        adjacency[link.target].push(link.source);
+    });
+    
+    const queue = [[startId]];
+    const visited = new Set([startId]);
+    
+    while (queue.length > 0) {
+        const path = queue.shift();
+        const curr = path[path.length - 1];
+        
+        if (curr === endId) return path;
+        
+        const neighbors = adjacency[curr] || [];
+        for (const n of neighbors) {
+            if (!visited.has(n)) {
+                visited.add(n);
+                queue.push([...path, n]);
+            }
+        }
+    }
+    return null;
 }
